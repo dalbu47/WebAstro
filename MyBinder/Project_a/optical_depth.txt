@@ -1,0 +1,93 @@
+import h5py as h5
+import numpy as np
+import scipy as sp
+from scipy.integrate import trapezoid, simpson
+
+
+def grid_mapping(data,N):
+    # Takes the flattened data and maps each value to its corresponding grid coordinate index.
+    newdata = np.reshape(data, (N,N,N), order='F')  # Order reshaping by 'fastest' (Fortran ordering)
+    return newdata
+
+# 1d function for calculating optical depth
+def optical_depth(grid,g,k,N=38,y=0,z=0):  
+    # Given the grid coordinates, metric values, and opacity for every point,
+    # this function returns the optical depth for each point.
+    # The metric components and opacity must be the same shape (N,N,N), while the grid can have (N,N,N,3)
+
+    Tau = np.zeros(N)  # Initialize tau
+    gridslice = grid[:,y,z,0]  # Only using the x direction so we slice accordingly and choose the x-component (0)
+    Ka = k[:,y,z]  # Should only consider subset of k corresponding to gridslice
+    dx = np.array([gridslice[i+1]-gridslice[i] for i in range(len(gridslice)-1)])
+    dx = np.append(dx, dx[-1])  # Add an element to give it shape N (=38)
+    ds = np.sqrt(g[:,y,z])*dx  # Discrete infinitesimal spacetime interval in the x direction
+    
+    for i in range(N):  # Iterate over all points
+        for j in range(len(gridslice)):
+            if j == 0:  # Left boundary
+                Tau[j] = min([Tau[j],Tau[j+1]]) + ds[j]*((Ka[j]+Ka[j+1])/2)
+            elif j == len(gridslice)-1:  # Right boundary
+                Tau[j] = min([Tau[j],Tau[j-1]]) + ds[j-1]*((Ka[j]+Ka[j-1])/2)
+            else:
+                Tau[j] = min([Tau[j],Tau[j+1],Tau[j-1]]) + min([ds[j]*(Ka[j]+Ka[j+1])/2,ds[j-1]*(Ka[j]+Ka[j-1])/2])
+    return Tau
+
+# -----------------------------------------------------------------------------------------------------------------
+# Datasets are flattened, so before the calculation, the goal is to restructure them such that they can be indexed 
+# by the indices i,j,k which each run to 38 (for the 38 grid points). This way each measurement is easily 
+# associated to its physical point in space. We use grid_mapping() on the flattened datasets, and then run 
+# optical_depth() using them.
+# -----------------------------------------------------------------------------------------------------------------
+
+with h5.File('Limited_Data/Vars_IntervalB-Lev0-4.4.6.h5','r') as f1:  # Import for gridcoords and metric dataset
+
+    # print(f'Groups: {list(f1)}')
+
+    # Unpack grid coordinates
+    coordstep = f1['GridCoords']['Step000000']  # Cube with 38^3 total points
+    x = np.unique(coordstep['x'][:])
+    y = np.unique(coordstep['y'][:])
+    z = np.unique(coordstep['z'][:])
+    N = len(x)
+    X,Y,Z = np.meshgrid(x,y,z, indexing='ij')  # Tuple of lists which gives every x,y,z position
+    
+    # Stacks the x,y,z axes s.t. it acts like a vector field, i.e. has shape (N,N,N,3). 
+    # Thus, grid_coords[i,j,k] returns the position vector associated with the grid coordinates (i,j,k).
+    grid_coords = np.stack((X,Y,Z), axis=-1)  
+
+    # ----------
+
+    # Unpack metric components (only use xx component for 1D subproblem)
+    gstep = f1['g']['Step000000']  # First timestep of the metric group, with 6 components (eg. 'xx','xy',...)
+
+    g = np.zeros((N,N,N,3,3))  # Initialize metric
+    axes = ['x', 'y', 'z']
+    for i,a in enumerate(axes):  # enumerate() extracts the index and element as a tuple
+        for j,b in enumerate(axes):
+
+            # Sort strings a and b alphabetically then join the strings to form 'ab' 
+            # This prevents calling gstep['yx'] which doesn't exist due to symmetry
+            key = "".join(sorted([a,b]))
+
+            # Reshape each component to align with grid indices
+            grid_map_comp = grid_mapping(gstep[key],N)  
+
+            # Since key is sorted alphabetically, off-diagonal elements are covered.
+            # e.g. i=2,j=1 --> (unsorted) 'zy' --> (sorted) 'yz' so g[z,y] = g_yz
+            g[..., i,j] = grid_map_comp  # g[i,j,k, a,b] gives the ab component of the metric at gridpoint [i,j,k] 
+# ============================
+
+with h5.File('Limited_Data/MCMoments_IntervalB-Lev0-4.4.6.h5') as f2:  # Import opacity dataset
+
+    # Unpack Absorbtion Opacity field Ka
+    kappastep = f2['AbsorptionOpacity_4_nue']['Step000000']  
+    kappa = kappastep['scalar'][:]
+    Ka = grid_mapping(kappa,N)  # Use mapping function to reshape flattened opacity dataset
+
+# ===================================================================
+
+# Calculate Optical depth at the largest and smallest z-coordinates 
+# (above NS) to gauge whether calculation is working properly
+TauLow = optical_depth(grid_coords,g[..., 0,0],Ka,N,0,0)
+TauHigh = optical_depth(grid_coords,g[..., 0,0],Ka,N,0,N-1)
+print(f'Tau High: \n{TauHigh}\n \nTau Low: \n{TauLow}')  # Seems to work well!
