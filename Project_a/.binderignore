@@ -4,6 +4,5 @@ env/
 .env/
 
 # Ignore your massive data folders so the watcher doesn't crash
-test_data/
-optical_depth_output/
+Data/
 *.h5
